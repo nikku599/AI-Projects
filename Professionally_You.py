@@ -6,6 +6,11 @@ import requests
 import json
 from pypdf import PdfReader
 import gradio as gr
+from pydantic import BaseModel
+
+class Evaluation(BaseModel):
+    is_acceptable: bool
+    feedback: str
 
 
 load_dotenv(override=True)
@@ -137,10 +142,60 @@ system_prompt += f"With this context, please chat with the user, always staying 
 
 
 # %%
+evaluator_system_prompt = f"You are an evaluator that decides whether a response to a question is acceptable. \
+You are provided with a conversation between a User and an Agent. Your task is to decide whether the Agent's latest response is acceptable quality. \
+The Agent is playing the role of {name} and is representing {name} on their website. \
+The Agent has been instructed to be professional and engaging, as if talking to a potential client or future employer who came across the website. \
+The Agent has been provided with context on {name} in the form of their summary and LinkedIn details. Here's the information:"
+
+evaluator_system_prompt += f"\n\n## Summary:\n{summary}\n\n## LinkedIn Profile:\n{linkedin}\n\n"
+evaluator_system_prompt += "With this context, please evaluate the latest response, replying with whether the response is acceptable and your feedback."
+
+# %%
+def evaluator_user_prompt(reply, message, history):
+    user_prompt = f"Here's the conversation between the User and the Agent: \n\n{history}\n\n"
+    user_prompt += f"Here's the latest message from the User: \n\n{message}\n\n"
+    user_prompt += f"Here's the latest response from the Agent: \n\n{reply}\n\n"
+    user_prompt += "Please evaluate the response, replying with whether it is acceptable and your feedback."
+    return user_prompt
+
+# %%
+gemini = OpenAI(
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
+
+# %%
+def evaluate(reply, message, history) -> Evaluation:
+    messages = [{"role":"system", "content": evaluator_system_prompt}] + [{"role":"user", "content": evaluator_user_prompt(reply, message, history)}]
+    response = gemini.beta.chat.completions.parse(model="gemini-2.5-flash", messages=messages, response_format=Evaluation)
+    return response.choices[0].message.parsed
+
+# %%
+messages = [{"role": "system", "content": system_prompt}] + [{"role": "user", "content": "do you hold a patent?"}]
+response = openai.chat.completions.create(model="gpt-4o-mini", messages=messages)
+reply = response.choices[0].message.content
+
+# %%
+reply
+
+# %%
+evaluate(reply, "Do you hold a patent?", messages)
+
+# %%
+def rerun(reply, message, history, feedback):
+    updated_system_prompt = system_prompt + "\n\n## Previous answer rejected\nYou just tried to reply, but the quality control rejected your reply\n"
+    updated_system_prompt += f"## Your attempted answer:\n{reply}\n\n"
+    updated_system_prompt += f"## Reason for rejection:\n{feedback}\n\n"
+    messages = [{"role": "system", "content": updated_system_prompt}] + history + [{"role": "user", "content": message}]
+    response = openai.chat.completions.create(model="gpt-4o-mini", messages=messages)
+    return response.choices[0].message.content
+
+# %%
 def chat(message, history):
+    history = [{"role": h["role"], "content": h["content"]} for h in history]
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": message}]
-    done = False
-    while not done:
+    while True:
         response = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -148,15 +203,21 @@ def chat(message, history):
             tool_choice="auto",
             max_tokens=1000
         )
-        finish_reason = response.choices[0].finish_reason
-        if finish_reason == "tool_calls":
-            tool_calls = response.choices[0].message.tool_calls
-            results = handle_tool_calls(tool_calls)
-            messages.append(response.choices[0].message)
+        reply = response.choices[0].message
+
+        if response.choices[0].finish_reason == "tool_calls":
+            results = handle_tool_calls(reply.tool_calls)
+            messages.append(reply)
             messages.extend(results)
         else:
-            done = True
-    return response.choices[0].message.content
+            reply_content = reply.content
+            evaluation = evaluate(reply_content, message, history)
+            if evaluation.is_acceptable:
+                print("Passed evaluation - returning reply")
+                return reply_content
+            print("Failed evaluation - retrying")
+            print(evaluation.feedback)
+            return rerun(reply_content, message, history, evaluation.feedback)
 
 # %%
 messages=[{"role": "system", "content": system_prompt}] + [{"role": "system", "content": "Make sure to ask the email id to get in touch as well"}]
