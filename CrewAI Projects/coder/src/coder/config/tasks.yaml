@@ -1,0 +1,7 @@
+coding_task:
+  description: >
+    Write a java code to achieve this assignment : {assignment}
+  expected_output: >
+    A text file with code and output of the code
+  agent: java_developer
+  output_file: output/code_and_output.md
